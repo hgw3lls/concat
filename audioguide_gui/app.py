@@ -9,7 +9,10 @@ import sys
 from PySide6.QtCore import QObject, Signal, Slot
 from PySide6.QtWidgets import (
 	QApplication,
+	QDialog,
+	QDialogButtonBox,
 	QFileDialog,
+	QGroupBox,
 	QHBoxLayout,
 	QLabel,
 	QLineEdit,
@@ -89,6 +92,33 @@ class MainWindow(QMainWindow):
 		self.corpus_picker = PathPicker("Corpus folder", "Choose corpus folder", "directory")
 		self.output_picker = PathPicker("Output folder", "Choose output folder", "directory")
 
+		self.advanced_options_edit = QPlainTextEdit()
+		self.advanced_options_edit.setPlaceholderText(
+			"Paste raw AudioGuide option syntax here. Text is preserved verbatim and appended "
+			"after generated settings."
+		)
+
+		self.preview_options_button = QPushButton("Preview Generated Options File")
+		self.preview_options_button.clicked.connect(self._preview_options_clicked)
+		self.save_options_button = QPushButton("Save Options File As…")
+		self.save_options_button.clicked.connect(self._save_options_clicked)
+		self.load_options_button = QPushButton("Load Existing Options File…")
+		self.load_options_button.clicked.connect(self._load_options_clicked)
+
+		advanced_button_layout = QHBoxLayout()
+		advanced_button_layout.addWidget(self.preview_options_button)
+		advanced_button_layout.addWidget(self.save_options_button)
+		advanced_button_layout.addWidget(self.load_options_button)
+		advanced_button_layout.addStretch(1)
+
+		advanced_layout = QVBoxLayout()
+		advanced_layout.addWidget(QLabel("Raw AudioGuide options"))
+		advanced_layout.addWidget(self.advanced_options_edit, stretch=1)
+		advanced_layout.addLayout(advanced_button_layout)
+
+		self.advanced_options_group = QGroupBox("Advanced Options")
+		self.advanced_options_group.setLayout(advanced_layout)
+
 		self.render_button = QPushButton("Render")
 		self.render_button.clicked.connect(self._render_clicked)
 		self.cancel_button = QPushButton("Cancel")
@@ -108,6 +138,7 @@ class MainWindow(QMainWindow):
 		layout.addWidget(self.target_picker)
 		layout.addWidget(self.corpus_picker)
 		layout.addWidget(self.output_picker)
+		layout.addWidget(self.advanced_options_group, stretch=1)
 		layout.addLayout(button_layout)
 		layout.addWidget(QLabel("Log output"))
 		layout.addWidget(self.log_output, stretch=1)
@@ -125,7 +156,68 @@ class MainWindow(QMainWindow):
 
 	def _config_from_inputs(self) -> ProjectConfig:
 		project = self._project_from_inputs()
-		return project.to_config()
+		config = project.to_config()
+		config.extra_options_text = self.advanced_options_edit.toPlainText()
+		return config
+
+	def _preview_options_clicked(self) -> None:
+		try:
+			options_text = self._option_builder.build(self._config_from_inputs())
+		except (OptionBuilderError, ValueError) as exc:
+			self._append_log(f"Cannot preview options file: {exc}")
+			return
+
+		dialog = QDialog(self)
+		dialog.setWindowTitle("Preview Generated Options File")
+		dialog.resize(700, 500)
+
+		preview_edit = QPlainTextEdit(dialog)
+		preview_edit.setReadOnly(True)
+		preview_edit.setPlainText(options_text)
+
+		buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close, dialog)
+		buttons.rejected.connect(dialog.reject)
+
+		layout = QVBoxLayout(dialog)
+		layout.addWidget(preview_edit)
+		layout.addWidget(buttons)
+		dialog.exec()
+
+	def _save_options_clicked(self) -> None:
+		path, _ = QFileDialog.getSaveFileName(
+			self,
+			"Save AudioGuide options file",
+			"audioguide-options.py",
+			"Python files (*.py);;All files (*)",
+		)
+		if not path:
+			return
+
+		try:
+			written_path = self._option_builder.build_file(self._config_from_inputs(), path)
+		except (OptionBuilderError, OSError, ValueError) as exc:
+			self._append_log(f"Cannot save options file: {exc}")
+			return
+		self._append_log(f"Saved options file: {written_path}")
+
+	def _load_options_clicked(self) -> None:
+		path, _ = QFileDialog.getOpenFileName(
+			self,
+			"Load AudioGuide options file",
+			"",
+			"Python files (*.py);;All files (*)",
+		)
+		if not path:
+			return
+
+		try:
+			options_text = Path(path).read_text(encoding="utf-8")
+		except OSError as exc:
+			self._append_log(f"Cannot load options file: {exc}")
+			return
+
+		self.advanced_options_edit.setPlainText(options_text)
+		self._append_log(f"Loaded raw options text: {path}")
 
 	def _render_clicked(self) -> None:
 		if self._runner is not None and self._runner.is_running:
@@ -197,6 +289,10 @@ class MainWindow(QMainWindow):
 		self.target_picker.set_enabled(not is_running)
 		self.corpus_picker.set_enabled(not is_running)
 		self.output_picker.set_enabled(not is_running)
+		self.advanced_options_edit.setReadOnly(is_running)
+		self.preview_options_button.setEnabled(not is_running)
+		self.save_options_button.setEnabled(not is_running)
+		self.load_options_button.setEnabled(not is_running)
 
 	@Slot(str)
 	def _append_log(self, line: str) -> None:
