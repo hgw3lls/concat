@@ -85,7 +85,7 @@ def build_options_text(config: ProjectConfig) -> str:
 			"############# EXTRA RAW AUDIOGUIDE OPTIONS #############",
 			"# Paste or edit advanced AudioGuide options below this line.",
 			"# Values here run after the generated settings above, so they may override them.",
-			config.extra_options_text.rstrip(),
+			config.extra_options_text,
 			"",
 		]
 	)

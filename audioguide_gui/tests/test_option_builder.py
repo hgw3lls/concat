@@ -46,6 +46,24 @@ class OptionBuilderTest(unittest.TestCase):
 			self.assertEqual(namespace["VERBOSITY"], 0)
 			self.assertEqual(namespace["OUTPUT_GAIN_DB"], -3)
 
+	def test_build_options_file_preserves_raw_options_text_verbatim(self):
+		with TemporaryDirectory() as tmp:
+			root = Path(tmp)
+			raw_options = "# custom\nTARGET = tsf('override.wav')\n\nOUTPUT_GAIN_DB = -3  \n"
+			config = ProjectConfig(
+				target_path="target.wav",
+				corpus_paths=["corpus"],
+				output_dir=str(root),
+				extra_options_text=raw_options,
+			)
+
+			options_path = root / "generated.py"
+			build_options_file(config, options_path)
+			generated = options_path.read_text(encoding="utf-8")
+			marker = "# Values here run after the generated settings above, so they may override them.\n"
+			raw_start = generated.index(marker) + len(marker)
+			self.assertTrue(generated[raw_start:].startswith(raw_options))
+
 	def test_build_options_file_can_disable_outputs(self):
 		with TemporaryDirectory() as tmp:
 			root = Path(tmp)
