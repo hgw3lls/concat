@@ -16,7 +16,7 @@ from PySide6.QtWidgets import (
 	QWidget,
 )
 
-from .project import ProjectConfig
+from .project import AudioGuideProject
 
 
 class PathPicker(QWidget):
@@ -83,19 +83,19 @@ class MainWindow(QMainWindow):
 		container.setLayout(layout)
 		self.setCentralWidget(container)
 
-	def _project_from_inputs(self) -> ProjectConfig:
-		return ProjectConfig(
-			target_path=self.target_picker.path,
-			corpus_paths=[self.corpus_picker.path] if self.corpus_picker.path else [],
-			output_dir=self.output_picker.path,
+	def _project_from_inputs(self) -> AudioGuideProject:
+		return AudioGuideProject(
+			target_sound_file=self.target_picker.path,
+			corpus_folder=self.corpus_picker.path,
+			output_folder=self.output_picker.path,
 		)
 
 	def _render_clicked(self) -> None:
 		project = self._project_from_inputs()
 		self.log_output.appendPlainText("Render requested.")
-		self.log_output.appendPlainText(f"Target sound file: {project.target_path or '(not selected)'}")
-		self.log_output.appendPlainText(f"Corpus folder: {', '.join(project.corpus_paths) or '(not selected)'}")
-		self.log_output.appendPlainText(f"Output folder: {project.output_dir or '(not selected)'}")
+		self.log_output.appendPlainText(f"Target sound file: {project.target_sound_file or '(not selected)'}")
+		self.log_output.appendPlainText(f"Corpus folder: {project.corpus_folder or '(not selected)'}")
+		self.log_output.appendPlainText(f"Output folder: {project.output_folder or '(not selected)'}")
 		self.log_output.appendPlainText("Rendering is not implemented yet.")
 		self.log_output.appendPlainText("")
 
