@@ -47,12 +47,24 @@ which ffmpeg
 
 ## Local source checkout setup
 
-From the repository root:
+On macOS, the fastest setup path is the repository installer:
+
+```bash
+scripts/install_macos.sh
+```
+
+The installer creates `.venv`, installs the Python packages required by the CLI
+and GUI, and uses Homebrew for Apple Silicon/Intel Mac command-line audio tools
+when Homebrew is available. Use `scripts/install_macos.sh --help` to see options
+for installing Homebrew, optional analysis extras, or building the `.app` bundle.
+
+For a manual setup from the repository root:
 
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install --upgrade pip
+python -m pip install numpy
 python -m pip install -r requirements-gui.txt
 ```
 
