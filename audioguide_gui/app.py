@@ -23,6 +23,7 @@ from PySide6.QtWidgets import (
 	QPlainTextEdit,
 	QPushButton,
 	QTabWidget,
+	QTextBrowser,
 	QVBoxLayout,
 	QWidget,
 )
@@ -38,6 +39,7 @@ from .project import (
 	save_project_file,
 )
 from .runner import AudioGuideRunner, AudioGuideToolRunner, RunnerError
+from .tutorial import render_tutorial_html
 
 
 class PathPicker(QWidget):
@@ -250,6 +252,19 @@ class ToolPanel(QWidget):
 		self.arguments_edit.setEnabled(not running)
 
 
+class TutorialPanel(QWidget):
+	"""Read-only guided tutorial embedded in the GUI."""
+
+	def __init__(self, parent: QWidget | None = None):
+		super().__init__(parent)
+		browser = QTextBrowser()
+		browser.setOpenExternalLinks(True)
+		browser.setHtml(render_tutorial_html())
+
+		layout = QVBoxLayout(self)
+		layout.addWidget(browser)
+
+
 class MainWindow(QMainWindow):
 	"""AudioGuide GUI window that builds options and launches renders."""
 
@@ -270,6 +285,7 @@ class MainWindow(QMainWindow):
 		self._signals.future_done.connect(self._render_finished)
 
 		self._create_project_menu()
+		self._create_help_menu()
 
 		self.target_picker = PathPicker("Target sound file", "Choose target sound file", "file")
 		self.corpus_picker = PathPicker("Corpus folder", "Choose corpus folder", "directory")
@@ -388,11 +404,14 @@ class MainWindow(QMainWindow):
 			"Granulate",
 		)
 
-		main_tabs = QTabWidget()
-		main_tabs.addTab(render_tab, "Render")
-		main_tabs.addTab(self.output_browser, "Output Browser")
-		main_tabs.addTab(tools_tabs, "Tools")
-		self.setCentralWidget(main_tabs)
+		self.tutorial_panel = TutorialPanel()
+
+		self.main_tabs = QTabWidget()
+		self.main_tabs.addTab(render_tab, "Render")
+		self.main_tabs.addTab(self.output_browser, "Output Browser")
+		self.main_tabs.addTab(tools_tabs, "Tools")
+		self.main_tabs.addTab(self.tutorial_panel, "Tutorial")
+		self.setCentralWidget(self.main_tabs)
 		self._update_window_title()
 
 	def _create_project_menu(self) -> None:
@@ -415,6 +434,16 @@ class MainWindow(QMainWindow):
 		self.save_project_as_action = QAction("Save Project As", self)
 		self.save_project_as_action.triggered.connect(self._save_project_as_clicked)
 		project_menu.addAction(self.save_project_as_action)
+
+	def _create_help_menu(self) -> None:
+		help_menu = self.menuBar().addMenu("Help")
+
+		self.show_tutorial_action = QAction("Show Tutorial", self)
+		self.show_tutorial_action.triggered.connect(self._show_tutorial_clicked)
+		help_menu.addAction(self.show_tutorial_action)
+
+	def _show_tutorial_clicked(self) -> None:
+		self.main_tabs.setCurrentWidget(self.tutorial_panel)
 
 	def _project_from_inputs(self) -> AudioGuideProject:
 		return AudioGuideProject(

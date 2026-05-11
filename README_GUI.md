@@ -79,6 +79,8 @@ Launching from the repository root keeps the GUI's relative lookups for
 
 ## Basic GUI usage
 
+For a guided walkthrough, open the built-in **Tutorial** tab or read `docs/GUI_TUTORIAL.md`.
+
 1. Start the app with `python -m audioguide_gui`.
 2. On the **Render** tab, choose a target sound file, corpus folder, and output
    folder.
