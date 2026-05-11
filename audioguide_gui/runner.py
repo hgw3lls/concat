@@ -1,15 +1,15 @@
-"""Subprocess runner for AudioGuide GUI renders.
+"""Subprocess runners for AudioGuide GUI commands.
 
-The GUI runner deliberately invokes the public ``agConcatenate.py`` command-line
-entry point instead of importing AudioGuide internals.  This keeps GUI renders
-aligned with existing AudioGuide CLI behavior while providing asynchronous log
-streaming and cancellation hooks for desktop front ends.
+The GUI runners deliberately invoke the public AudioGuide command-line entry
+points instead of importing AudioGuide internals.  This keeps GUI renders and
+utility tools aligned with existing CLI behavior while providing asynchronous
+log streaming and cancellation hooks for desktop front ends.
 """
 
 from __future__ import annotations
 
 import ast
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 import os
@@ -57,31 +57,21 @@ class CallbackSignal:
 			callback(*args)
 
 
-class AudioGuideRunner:
-	"""Run ``agConcatenate.py`` asynchronously for a generated options file.
-
-	``start()`` returns immediately with a :class:`concurrent.futures.Future`, so
-	callers can launch renders from GUI code without blocking the GUI thread.  Log
-	callbacks and signal-like attributes are emitted from worker threads; Qt front
-	ends should forward them to the GUI thread using queued connections or their
-	own signal bridge.
-	"""
+class SubprocessRunner:
+	"""Run a subprocess asynchronously with shared logging and cancellation."""
 
 	_STOP_TIMEOUT_SECONDS = 5.0
 
 	def __init__(
 		self,
-		options_file: str | os.PathLike[str] | None = None,
 		*,
-		ag_concatenate_path: str | os.PathLike[str] | None = None,
 		python_executable: str | os.PathLike[str] | None = None,
 		cwd: str | os.PathLike[str] | None = None,
 		env: dict[str, str] | None = None,
+		thread_name_prefix: str = "audioguide-runner",
 	) -> None:
-		self.options_file = Path(options_file) if options_file is not None else None
-		self.ag_concatenate_path = Path(ag_concatenate_path) if ag_concatenate_path is not None else self._default_ag_concatenate_path()
 		self.python_executable = str(python_executable) if python_executable is not None else sys.executable
-		self.cwd = Path(cwd) if cwd is not None else self.ag_concatenate_path.parent
+		self.cwd = Path(cwd) if cwd is not None else Path.cwd()
 		self.env = env
 
 		self.log_updated = CallbackSignal()
@@ -90,7 +80,7 @@ class AudioGuideRunner:
 		self.finished = CallbackSignal()
 		self.error = CallbackSignal()
 
-		self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="audioguide-runner")
+		self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix=thread_name_prefix)
 		self._process: subprocess.Popen[str] | None = None
 		self._future: Future[int] | None = None
 		self._lock = threading.Lock()
@@ -116,44 +106,33 @@ class AudioGuideRunner:
 		"""Register a callback receiving launch/preflight errors as text."""
 		return self.error.connect(callback)
 
-	def start(self, options_file: str | os.PathLike[str] | None = None) -> Future[int]:
-		"""Start AudioGuide in the background and return a future for its exit code."""
+	def start(self, *args: object, **kwargs: object) -> Future[int]:
+		"""Start the command in the background and return a future for its exit code."""
 		with self._lock:
 			if self._future is not None and not self._future.done():
 				raise RunnerError("AudioGuide is already running.")
-			if options_file is not None:
-				self.options_file = Path(options_file)
 			self._cancel_requested.clear()
-			self._future = self._executor.submit(self._run)
+			self._future = self._executor.submit(self._run, *args, **kwargs)
 			return self._future
 
-	def run(self, options_file: str | os.PathLike[str] | None = None) -> Future[int]:
+	def run(self, *args: object, **kwargs: object) -> Future[int]:
 		"""Alias for :meth:`start` for callers that prefer runner-style naming."""
-		return self.start(options_file)
-
-	def render(self, options_file: str | os.PathLike[str] | None = None) -> Future[int]:
-		"""Launch a render for an already generated options file.
-
-		The return value is a future rather than a direct exit code to avoid blocking
-		GUI callers.  Use ``future.result()`` from a worker/test thread if a blocking
-		wait is required.
-		"""
-		return self.start(options_file)
+		return self.start(*args, **kwargs)
 
 	def wait(self, timeout: float | None = None) -> int:
-		"""Wait for the current render future and return its exit code."""
+		"""Wait for the current subprocess future and return its exit code."""
 		future = self._future
 		if future is None:
 			raise RunnerError("AudioGuide has not been started.")
 		return future.result(timeout=timeout)
 
 	def cancel(self) -> None:
-		"""Request cancellation and terminate the running AudioGuide process."""
+		"""Request cancellation and terminate the running process."""
 		self._cancel_requested.set()
 		self.terminate()
 
 	def terminate(self) -> None:
-		"""Terminate the running AudioGuide process, killing it if needed."""
+		"""Terminate the running process, killing it if needed."""
 		process = self._process
 		if process is None or process.poll() is not None:
 			return
@@ -165,11 +144,10 @@ class AudioGuideRunner:
 		future = self._future
 		return future is not None and not future.done()
 
-	def _run(self) -> int:
+	def _run(self, *args: object, **kwargs: object) -> int:
 		try:
-			options_path = self._preflight()
-			command = [self.python_executable, str(self.ag_concatenate_path), str(options_path)]
-			self._emit_log(f"Launching AudioGuide: {' '.join(command)}")
+			command = self._command(*args, **kwargs)
+			self._emit_log(f"Launching command: {' '.join(command)}")
 			process_kwargs = self._process_group_kwargs()
 			process = subprocess.Popen(
 				command,
@@ -203,6 +181,9 @@ class AudioGuideRunner:
 			with self._lock:
 				self._process = None
 
+	def _command(self, *args: object, **kwargs: object) -> list[str]:
+		raise NotImplementedError
+
 	def _stream_pipe(self, pipe: TextIO | None, stream_signal: CallbackSignal) -> None:
 		if pipe is None:
 			return
@@ -214,6 +195,111 @@ class AudioGuideRunner:
 
 	def _emit_log(self, line: str) -> None:
 		self.log_updated.emit(line)
+
+	def _terminate_process_tree(self, process: subprocess.Popen[str]) -> None:
+		if os.name == "posix":
+			try:
+				os.killpg(process.pid, signal.SIGTERM)
+			except ProcessLookupError:
+				return
+		else:
+			process.terminate()
+		try:
+			process.wait(timeout=self._STOP_TIMEOUT_SECONDS)
+		except subprocess.TimeoutExpired:
+			if os.name == "posix":
+				try:
+					os.killpg(process.pid, signal.SIGKILL)
+				except ProcessLookupError:
+					return
+			else:
+				process.kill()
+
+	def _process_group_kwargs(self) -> dict[str, object]:
+		if os.name == "posix":
+			return {"start_new_session": True}
+		if os.name == "nt":
+			return {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP}
+		return {}
+
+
+class AudioGuideToolRunner(SubprocessRunner):
+	"""Run an AudioGuide utility script asynchronously."""
+
+	def __init__(
+		self,
+		script_path: str | os.PathLike[str],
+		arguments: Sequence[str] | None = None,
+		*,
+		python_executable: str | os.PathLike[str] | None = None,
+		cwd: str | os.PathLike[str] | None = None,
+		env: dict[str, str] | None = None,
+	) -> None:
+		self.script_path = Path(script_path)
+		self.arguments = list(arguments or [])
+		tool_cwd = cwd if cwd is not None else self.script_path.parent
+		super().__init__(python_executable=python_executable, cwd=tool_cwd, env=env, thread_name_prefix="audioguide-tool-runner")
+
+	def start(self, arguments: Sequence[str] | None = None) -> Future[int]:
+		"""Start the utility script with optional replacement arguments."""
+		if arguments is not None:
+			self.arguments = list(arguments)
+		return super().start()
+
+	def _command(self) -> list[str]:
+		script_path = self.script_path.expanduser().resolve()
+		self.script_path = script_path
+		if not script_path.exists():
+			raise RunnerError(f'AudioGuide utility script was not found: "{script_path}"')
+		if not script_path.is_file():
+			raise RunnerError(f'AudioGuide utility path is not a file: "{script_path}"')
+		if not self.python_executable or shutil.which(str(self.python_executable)) is None:
+			raise RunnerError(f'Python executable was not found: "{self.python_executable}"')
+		return [self.python_executable, str(script_path), *self.arguments]
+
+
+class AudioGuideRunner(SubprocessRunner):
+	"""Run ``agConcatenate.py`` asynchronously for a generated options file.
+
+	``start()`` returns immediately with a :class:`concurrent.futures.Future`, so
+	callers can launch renders from GUI code without blocking the GUI thread.  Log
+	callbacks and signal-like attributes are emitted from worker threads; Qt front
+	ends should forward them to the GUI thread using queued connections or their
+	own signal bridge.
+	"""
+
+	def __init__(
+		self,
+		options_file: str | os.PathLike[str] | None = None,
+		*,
+		ag_concatenate_path: str | os.PathLike[str] | None = None,
+		python_executable: str | os.PathLike[str] | None = None,
+		cwd: str | os.PathLike[str] | None = None,
+		env: dict[str, str] | None = None,
+	) -> None:
+		self.options_file = Path(options_file) if options_file is not None else None
+		self.ag_concatenate_path = Path(ag_concatenate_path) if ag_concatenate_path is not None else self._default_ag_concatenate_path()
+		runner_cwd = cwd if cwd is not None else self.ag_concatenate_path.parent
+		super().__init__(python_executable=python_executable, cwd=runner_cwd, env=env)
+
+	def start(self, options_file: str | os.PathLike[str] | None = None) -> Future[int]:
+		"""Start AudioGuide in the background and return a future for its exit code."""
+		if options_file is not None:
+			self.options_file = Path(options_file)
+		return super().start()
+
+	def render(self, options_file: str | os.PathLike[str] | None = None) -> Future[int]:
+		"""Launch a render for an already generated options file.
+
+		The return value is a future rather than a direct exit code to avoid blocking
+		GUI callers.  Use ``future.result()`` from a worker/test thread if a blocking
+		wait is required.
+		"""
+		return self.start(options_file)
+
+	def _command(self) -> list[str]:
+		options_path = self._preflight()
+		return [self.python_executable, str(self.ag_concatenate_path), str(options_path)]
 
 	def _preflight(self) -> Path:
 		if self.options_file is None:
@@ -287,32 +373,6 @@ class AudioGuideRunner:
 					except (ValueError, TypeError):
 						pass
 		return assignments
-
-	def _terminate_process_tree(self, process: subprocess.Popen[str]) -> None:
-		if os.name == "posix":
-			try:
-				os.killpg(process.pid, signal.SIGTERM)
-			except ProcessLookupError:
-				return
-		else:
-			process.terminate()
-		try:
-			process.wait(timeout=self._STOP_TIMEOUT_SECONDS)
-		except subprocess.TimeoutExpired:
-			if os.name == "posix":
-				try:
-					os.killpg(process.pid, signal.SIGKILL)
-				except ProcessLookupError:
-					return
-			else:
-				process.kill()
-
-	def _process_group_kwargs(self) -> dict[str, object]:
-		if os.name == "posix":
-			return {"start_new_session": True}
-		if os.name == "nt":
-			return {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP}
-		return {}
 
 	@staticmethod
 	def _default_ag_concatenate_path() -> Path:

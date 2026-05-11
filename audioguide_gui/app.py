@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from concurrent.futures import Future
 from pathlib import Path
+import shlex
 import sys
 
 from PySide6.QtCore import QObject, Signal, Slot
@@ -21,6 +22,7 @@ from PySide6.QtWidgets import (
 	QMainWindow,
 	QPlainTextEdit,
 	QPushButton,
+	QTabWidget,
 	QVBoxLayout,
 	QWidget,
 )
@@ -34,7 +36,7 @@ from .project import (
 	load_project_file,
 	save_project_file,
 )
-from .runner import AudioGuideRunner, RunnerError
+from .runner import AudioGuideRunner, AudioGuideToolRunner, RunnerError
 
 
 class PathPicker(QWidget):
@@ -48,13 +50,21 @@ class PathPicker(QWidget):
 		self.label = QLabel(label)
 		self.path_edit = QLineEdit()
 		self.path_edit.setReadOnly(True)
-		self.browse_button = QPushButton("Browse…")
+		if self._mode == "file_or_directory":
+			self.browse_button = QPushButton("Browse File…")
+			self.folder_button = QPushButton("Browse Folder…")
+			self.folder_button.clicked.connect(self._choose_directory)
+		else:
+			self.browse_button = QPushButton("Browse…")
+			self.folder_button = None
 		self.browse_button.clicked.connect(self._choose_path)
 
 		layout = QHBoxLayout(self)
 		layout.addWidget(self.label)
 		layout.addWidget(self.path_edit, stretch=1)
 		layout.addWidget(self.browse_button)
+		if self.folder_button is not None:
+			layout.addWidget(self.folder_button)
 
 	@property
 	def path(self) -> str:
@@ -68,12 +78,23 @@ class PathPicker(QWidget):
 	def set_enabled(self, enabled: bool) -> None:
 		"""Enable or disable editing controls for this picker."""
 		self.browse_button.setEnabled(enabled)
+		if self.folder_button is not None:
+			self.folder_button.setEnabled(enabled)
 
 	def _choose_path(self) -> None:
 		if self._mode == "file":
 			path, _ = QFileDialog.getOpenFileName(self, self._dialog_title)
+		elif self._mode == "save_file":
+			path, _ = QFileDialog.getSaveFileName(self, self._dialog_title)
+		elif self._mode == "file_or_directory":
+			path, _ = QFileDialog.getOpenFileName(self, self._dialog_title)
 		else:
 			path = QFileDialog.getExistingDirectory(self, self._dialog_title)
+		if path:
+			self.path_edit.setText(path)
+
+	def _choose_directory(self) -> None:
+		path = QFileDialog.getExistingDirectory(self, self._dialog_title)
 		if path:
 			self.path_edit.setText(path)
 
@@ -83,6 +104,149 @@ class _RunnerSignals(QObject):
 
 	log_updated = Signal(str)
 	future_done = Signal(object)
+
+
+class ToolPanel(QWidget):
+	"""GUI wrapper for one AudioGuide utility script."""
+
+	def __init__(
+		self,
+		*,
+		title: str,
+		script_name: str,
+		input_label: str,
+		output_label: str | None,
+		output_flag: str | None,
+		parent: QWidget | None = None,
+	):
+		super().__init__(parent)
+		self._title = title
+		self._script_path = Path(__file__).resolve().parent.parent / script_name
+		self._output_flag = output_flag
+		self._runner: AudioGuideToolRunner | None = None
+		self._future: Future[int] | None = None
+		self._cancel_requested = False
+		self._signals = _RunnerSignals(self)
+		self._signals.log_updated.connect(self._append_log)
+		self._signals.future_done.connect(self._run_finished)
+
+		description = QLabel(f"Run {script_name} from the GUI.")
+		self.input_picker = PathPicker(input_label, f"Choose input for {title}", "file_or_directory")
+		self.output_picker: PathPicker | None = None
+		if output_label is not None:
+			self.output_picker = PathPicker(output_label, f"Choose output for {title}", "save_file")
+
+		self.arguments_edit = QLineEdit()
+		self.arguments_edit.setPlaceholderText("Advanced flags, e.g. -t -45 --minimum 0.2")
+		arguments_layout = QHBoxLayout()
+		arguments_layout.addWidget(QLabel("Advanced flags"))
+		arguments_layout.addWidget(self.arguments_edit, stretch=1)
+
+		self.run_button = QPushButton("Run")
+		self.run_button.clicked.connect(self._run_clicked)
+		self.cancel_button = QPushButton("Cancel")
+		self.cancel_button.setEnabled(False)
+		self.cancel_button.clicked.connect(self._cancel_clicked)
+		button_layout = QHBoxLayout()
+		button_layout.addStretch(1)
+		button_layout.addWidget(self.cancel_button)
+		button_layout.addWidget(self.run_button)
+
+		self.log_output = QPlainTextEdit()
+		self.log_output.setReadOnly(True)
+		self.log_output.setPlaceholderText(f"{script_name} log output will appear here.")
+
+		layout = QVBoxLayout(self)
+		layout.addWidget(description)
+		layout.addWidget(self.input_picker)
+		if self.output_picker is not None:
+			layout.addWidget(self.output_picker)
+		layout.addLayout(arguments_layout)
+		layout.addLayout(button_layout)
+		layout.addWidget(QLabel("Live log output"))
+		layout.addWidget(self.log_output, stretch=1)
+
+	def _build_arguments(self) -> list[str]:
+		input_path = self.input_picker.path
+		if not input_path:
+			raise ValueError("Choose an input file or folder before running this tool.")
+
+		try:
+			advanced_args = shlex.split(self.arguments_edit.text())
+		except ValueError as exc:
+			raise ValueError(f"Cannot parse advanced flags: {exc}") from exc
+
+		arguments = list(advanced_args)
+		if self.output_picker is not None:
+			output_path = self.output_picker.path
+			if self._output_flag is None:
+				if not output_path:
+					raise ValueError("Choose an output location before running this tool.")
+				arguments.extend([input_path, output_path])
+			else:
+				if output_path:
+					arguments.extend([self._output_flag, output_path])
+				arguments.append(input_path)
+		else:
+			arguments.append(input_path)
+		return arguments
+
+	def _run_clicked(self) -> None:
+		try:
+			arguments = self._build_arguments()
+		except ValueError as exc:
+			self._append_log(f"Cannot run {self._title}: {exc}")
+			return
+
+		self.log_output.clear()
+		self._cancel_requested = False
+		self._runner = AudioGuideToolRunner(self._script_path, arguments)
+		self._runner.add_log_callback(lambda line: self._signals.log_updated.emit(line))
+		self._runner.add_error_callback(lambda message: self._signals.log_updated.emit(f"Runner error: {message}"))
+
+		try:
+			self._future = self._runner.start()
+		except RunnerError as exc:
+			self._append_log(f"Cannot run {self._title}: {exc}")
+			return
+
+		self._set_running(True)
+		self._future.add_done_callback(lambda future: self._signals.future_done.emit(future))
+
+	def _cancel_clicked(self) -> None:
+		if self._runner is None:
+			return
+		self._cancel_requested = True
+		self._append_log(f"Cancellation requested for {self._title}…")
+		self._runner.cancel()
+		self.cancel_button.setEnabled(False)
+
+	@Slot(str)
+	def _append_log(self, line: str) -> None:
+		self.log_output.appendPlainText(line)
+
+	@Slot(object)
+	def _run_finished(self, future: Future[int]) -> None:
+		self._set_running(False)
+		try:
+			exit_code = future.result()
+		except Exception as exc:
+			self._append_log(f"{self._title} failed: {exc}")
+			return
+		if self._cancel_requested:
+			self._append_log(f"{self._title} cancelled with exit code {exit_code}.")
+		elif exit_code == 0:
+			self._append_log(f"{self._title} finished successfully.")
+		else:
+			self._append_log(f"{self._title} exited with code {exit_code}.")
+
+	def _set_running(self, running: bool) -> None:
+		self.run_button.setEnabled(not running)
+		self.cancel_button.setEnabled(running)
+		self.input_picker.set_enabled(not running)
+		if self.output_picker is not None:
+			self.output_picker.set_enabled(not running)
+		self.arguments_edit.setEnabled(not running)
 
 
 class MainWindow(QMainWindow):
@@ -174,20 +338,56 @@ class MainWindow(QMainWindow):
 		self.log_output.setReadOnly(True)
 		self.log_output.setPlaceholderText("AudioGuide GUI log output will appear here.")
 
-		layout = QVBoxLayout()
-		layout.addWidget(self.target_picker)
-		layout.addWidget(self.corpus_picker)
-		layout.addWidget(self.output_picker)
-		layout.addLayout(output_name_layout)
-		layout.addWidget(self.output_formats_group)
-		layout.addWidget(self.advanced_options_group, stretch=1)
-		layout.addLayout(button_layout)
-		layout.addWidget(QLabel("Log output"))
-		layout.addWidget(self.log_output, stretch=1)
+		render_layout = QVBoxLayout()
+		render_layout.addWidget(self.target_picker)
+		render_layout.addWidget(self.corpus_picker)
+		render_layout.addWidget(self.output_picker)
+		render_layout.addLayout(output_name_layout)
+		render_layout.addWidget(self.output_formats_group)
+		render_layout.addWidget(self.advanced_options_group, stretch=1)
+		render_layout.addLayout(button_layout)
+		render_layout.addWidget(QLabel("Log output"))
+		render_layout.addWidget(self.log_output, stretch=1)
 
-		container = QWidget()
-		container.setLayout(layout)
-		self.setCentralWidget(container)
+		render_tab = QWidget()
+		render_tab.setLayout(render_layout)
+
+		tools_tabs = QTabWidget()
+		tools_tabs.addTab(
+			ToolPanel(
+				title="Segment Sound File",
+				script_name="agSegmentSf.py",
+				input_label="Sound file or folder",
+				output_label="Segmentation output file",
+				output_flag="-f",
+			),
+			"Segment",
+		)
+		tools_tabs.addTab(
+			ToolPanel(
+				title="Get Sound File Descriptors",
+				script_name="agGetSfDescriptors.py",
+				input_label="Sound file or folder",
+				output_label="Descriptor JSON output file",
+				output_flag=None,
+			),
+			"Descriptors",
+		)
+		tools_tabs.addTab(
+			ToolPanel(
+				title="Granulate Sound File",
+				script_name="agGranulateSf.py",
+				input_label="Sound file or folder",
+				output_label="Segmentation output file",
+				output_flag="-f",
+			),
+			"Granulate",
+		)
+
+		main_tabs = QTabWidget()
+		main_tabs.addTab(render_tab, "Render")
+		main_tabs.addTab(tools_tabs, "Tools")
+		self.setCentralWidget(main_tabs)
 		self._update_window_title()
 
 	def _create_project_menu(self) -> None:
