@@ -28,6 +28,7 @@ from PySide6.QtWidgets import (
 )
 
 from .option_builder import OptionBuilder, OptionBuilderError
+from .output_browser import OutputBrowserPanel
 from .project import (
 	PROJECT_FILE_EXTENSION,
 	AudioGuideProject,
@@ -263,6 +264,7 @@ class MainWindow(QMainWindow):
 		self._cancel_requested = False
 		self._current_project_path: Path | None = None
 		self._last_options_file_path = ""
+		self._last_render_output_dir = ""
 		self._signals = _RunnerSignals(self)
 		self._signals.log_updated.connect(self._append_log)
 		self._signals.future_done.connect(self._render_finished)
@@ -334,6 +336,8 @@ class MainWindow(QMainWindow):
 		button_layout.addWidget(self.cancel_button)
 		button_layout.addWidget(self.render_button)
 
+		self.output_browser = OutputBrowserPanel()
+
 		self.log_output = QPlainTextEdit()
 		self.log_output.setReadOnly(True)
 		self.log_output.setPlaceholderText("AudioGuide GUI log output will appear here.")
@@ -386,6 +390,7 @@ class MainWindow(QMainWindow):
 
 		main_tabs = QTabWidget()
 		main_tabs.addTab(render_tab, "Render")
+		main_tabs.addTab(self.output_browser, "Output Browser")
 		main_tabs.addTab(tools_tabs, "Tools")
 		self.setCentralWidget(main_tabs)
 		self._update_window_title()
@@ -446,6 +451,8 @@ class MainWindow(QMainWindow):
 		self._current_project_path = None
 		self._apply_config(ProjectConfig())
 		self.log_output.clear()
+		self.output_browser.clear()
+		self._last_render_output_dir = ""
 		self._append_log("Started a new project.")
 		self._update_window_title()
 
@@ -465,6 +472,8 @@ class MainWindow(QMainWindow):
 			return
 		self._current_project_path = Path(path)
 		self._apply_config(config)
+		self.output_browser.clear()
+		self._last_render_output_dir = ""
 		self._append_log(f"Opened project: {self._current_project_path}")
 		self._update_window_title()
 
@@ -563,6 +572,7 @@ class MainWindow(QMainWindow):
 			return
 
 		self.log_output.clear()
+		self.output_browser.clear()
 		try:
 			config = self._config_from_inputs()
 			self._validate_config(config)
@@ -573,6 +583,7 @@ class MainWindow(QMainWindow):
 			return
 
 		self._last_options_file_path = str(options_path)
+		self._last_render_output_dir = config.output_dir
 		self._append_log("Render requested.")
 		self._append_log(f"Target sound file: {config.target_path}")
 		self._append_log(f"Corpus folder: {config.corpus_paths[0]}")
@@ -660,6 +671,9 @@ class MainWindow(QMainWindow):
 
 		if exit_code == 0:
 			self._append_log("Render finished successfully.")
+			if self._last_render_output_dir:
+				self.output_browser.scan(self._last_render_output_dir)
+				self._append_log(f"Scanned output folder: {self._last_render_output_dir}")
 		elif self._cancel_requested:
 			self._append_log(f"Render cancelled with exit code {exit_code}.")
 		else:
