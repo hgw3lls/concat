@@ -7,7 +7,7 @@ import time
 import unittest
 from unittest.mock import patch
 
-from audioguide_gui.runner import AudioGuideRunner, RunnerError
+from audioguide_gui.runner import AudioGuideRunner, AudioGuideToolRunner, RunnerError
 
 
 class AudioGuideRunnerTest(unittest.TestCase):
@@ -78,6 +78,30 @@ class AudioGuideRunnerTest(unittest.TestCase):
 			runner.cancel()
 
 			self.assertNotEqual(future.result(timeout=5), 0)
+
+	def test_tool_runner_launches_utility_script_with_arguments(self):
+		with TemporaryDirectory() as tmp:
+			root = Path(tmp)
+			script = root / "fake_tool.py"
+			script.write_text(
+				textwrap.dedent(
+					"""
+					import sys
+
+					print("args=" + "|".join(sys.argv[1:]), flush=True)
+					"""
+				),
+				encoding="utf-8",
+			)
+			logs: list[str] = []
+
+			runner = AudioGuideToolRunner(script, ["-f", str(root / "out.txt"), str(root / "in.wav")])
+			runner.add_log_callback(logs.append)
+
+			future = runner.start()
+
+			self.assertEqual(future.result(timeout=5), 0)
+			self.assertIn(f"args=-f|{root / 'out.txt'}|{root / 'in.wav'}", logs)
 
 	def test_runner_reports_missing_options_file(self):
 		with TemporaryDirectory() as tmp:
